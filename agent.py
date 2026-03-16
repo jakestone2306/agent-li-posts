@@ -1,17 +1,20 @@
 """
 LinkedIn Daily Post Agent for Jake Stone
-Generates post + branded graphic, sends both to Slack at 7am PT.
+- Uses Claude to generate a post in Jake's voice
+- Generates a branded visual asset as PNG via Playwright
+- Uploads image + sends Slack DM to Jake at 7am PT daily
 """
 
 import os
 import re
 import json
 import time
+import base64
 import logging
+import textwrap
 import requests
 from datetime import datetime, timezone
 from anthropic import Anthropic
-from image_gen import generate_image
 
 logger = logging.getLogger(__name__)
 
@@ -21,150 +24,223 @@ SLACK_USER_ID = os.environ.get("SLACK_USER_ID", "U08357HEYJF")
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
-JAKE_VOICE = """
-You are writing LinkedIn posts for Jake Stone, VP of Sales at Adapt API — InsurTech that automates
-P&C insurance agency workflows.
-
-Jake's voice:
-- Direct, punchy, zero corporate fluff
-- Mix of bold hot takes AND personal storytelling moments
-- Short lines. Lots of white space. No walls of text.
-- Strong opening hook — a bold claim, surprising number, or personal moment
-- Ends with a question to drive comments
-- 3-5 hashtags at the bottom only
-- Max 260 words
-
-NEVER: press release language, buzzwords like "synergy" or "leverage", more than 5 hashtags.
-
-Topics to rotate through:
-- AI + automation in insurance agencies (what's working vs. hype)
-- Building a high-performance SDR/AE team from scratch
-- InsurTech modernization — who's winning, who's falling behind
-- SDR tech stacks and why cutting budget kills performance
-- Personal stories from growing Adapt's sales team
-- Bold takes on the future of P&C insurance distribution
-- What insurance agencies get wrong about technology
-"""
-
 ASSET_TYPES = ["quote_card", "stat_card", "poll_card"]
-
 TOPICS = [
-    "AI and automation in insurance agencies — what's actually working vs hype right now",
-    "Building a high-performance SDR team from scratch — personal lessons from Adapt",
-    "The InsurTech modernization wave — who's winning and who's getting left behind",
+    "The two types of insurance agencies in 2026 — those embracing AI/automation and those falling behind",
     "Why cutting SDR tech budget is the most expensive mistake a sales leader makes",
-    "Personal story about a milestone, a rep's growth, or a hard lesson at Adapt",
-    "Bold take on the future of P&C insurance distribution in 2026",
-    "What most insurance agencies get completely wrong about adopting new technology",
+    "What most insurance agencies get wrong about technology adoption",
+    "Building a high-performance SDR team from scratch — real lessons, no fluff",
+    "Bold take on where P&C insurance distribution is headed in the next 3 years",
+    "Personal story about growing Adapt's sales function and hitting a milestone",
+    "AI is changing how agencies quote, bind, and service — what's actually working vs hype",
+]
+COLORS = [
+    ("0f0f1a", "1a1a2e", "7c3aed", "a78bfa"),   # purple
+    ("0a1628", "1e3a5f", "2563eb", "60a5fa"),   # blue
+    ("0a1f14", "1a3a28", "059669", "34d399"),   # green
+    ("1a0f28", "2d1b69", "7c3aed", "c4b5fd"),   # violet
+    ("1a0a00", "3d1f00", "d97706", "fbbf24"),   # amber
 ]
 
 
-def get_news_hooks():
+def get_trending_hooks():
     hooks = []
-    try:
-        r = requests.get(
-            "https://newsapi.org/v2/everything",
-            params={
-                "q": "(insurtech OR insurance automation OR B2B sales OR SDR) AND (AI OR technology)",
-                "language": "en", "sortBy": "publishedAt", "pageSize": 5,
-                "apiKey": os.environ.get("NEWS_API_KEY", "")
-            }, timeout=8
-        )
-        if r.status_code == 200:
-            hooks = [f"- {a['title']}" for a in r.json().get("articles", [])[:4]]
-    except Exception:
-        pass
-    return "\n".join(hooks) if hooks else ""
+    api_key = os.environ.get("NEWS_API_KEY", "")
+    if api_key:
+        try:
+            r = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={
+                    "q": "(insurtech OR insurance automation OR SDR AI OR B2B sales)",
+                    "language": "en", "sortBy": "publishedAt", "pageSize": 5,
+                    "apiKey": api_key
+                }, timeout=8
+            )
+            if r.status_code == 200:
+                hooks = [f"- {a['title']}" for a in r.json().get("articles", [])[:4]]
+        except Exception:
+            pass
+
+    if not hooks:
+        hooks = [
+            "- 95% of corporate AI initiatives deliver zero measurable ROI (MLQ report)",
+            "- Insurance agencies still manually re-keying data 50% of the time",
+            "- The average SDR tech stack now costs $1,000/month per rep",
+            "- P&C carriers racing to modernize legacy systems before 2027",
+            "- AI is replacing 30% of SDR tasks — reps who use it are 40% more productive",
+        ]
+    return "\n".join(hooks)
 
 
 def generate_post_and_asset(day_num=0):
     asset_type = ASSET_TYPES[day_num % len(ASSET_TYPES)]
     topic = TOPICS[day_num % len(TOPICS)]
-    news = get_news_hooks()
-    news_section = f"\nRecent news to optionally riff off (pick 1 if relevant, don't be literal):\n{news}" if news else ""
+    hooks = get_trending_hooks()
 
-    prompt = f"""{JAKE_VOICE}
+    prompt = f"""You are writing LinkedIn posts for Jake Stone, VP of Sales at Adapt API — an InsurTech company automating workflows for P&C insurance agencies.
 
-Today's topic: {topic}{news_section}
+Jake's voice:
+- Direct, punchy, zero corporate fluff
+- Short punchy lines with lots of line breaks — no walls of text
+- Mix of bold takes ("There will be 2 types...") and personal storytelling
+- Strong hook in the first line
+- Ends with a question to drive comments
+- 3-5 hashtags max at the bottom
+- Max 260 words
 
-Write ONE LinkedIn post for Jake. Make it feel fresh and human.
+Today's topic: {topic}
 
-Then create a visual asset of type: {asset_type}
-- quote_card: A bold quote pulled from the post (max 10 words)
-- stat_card: A punchy stat or data point with brief context
-- poll_card: A "Drop your answer below: X or Y?" engagement prompt
+Recent industry context (use 1-2 if relevant, don't copy directly):
+{hooks}
 
-Respond in this exact JSON (no markdown fences, no extra text):
+Write ONE LinkedIn post. Then create a visual asset of type: {asset_type}
+- quote_card: pull a bold statement from the post (max 10 words)
+- stat_card: a punchy stat or data point with brief context
+- poll_card: an "Adapters vs Resisters" or binary choice for comments
+
+Respond ONLY in this JSON (no markdown fences):
 {{
   "post": "full linkedin post text",
   "asset_type": "{asset_type}",
-  "asset_headline": "big bold graphic text, max 10 words",
-  "asset_subtext": "1 supporting line for context",
-  "asset_cta": "short action CTA for the graphic button"
+  "headline": "bold text for graphic max 10 words",
+  "subtext": "1 supporting line for graphic",
+  "cta": "short engagement CTA for graphic"
 }}"""
 
-    r = client.messages.create(
+    response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1500,
         messages=[{"role": "user", "content": prompt}]
     )
-    text = r.content[0].text.strip()
+    text = response.content[0].text.strip()
     m = re.search(r'\{.*\}', text, re.DOTALL)
-    return json.loads(m.group()) if m else json.loads(text)
+    return json.loads(m.group())
+
+
+def generate_graphic_html(headline, subtext, cta, day_num=0):
+    bg1, bg2, accent, light = COLORS[day_num % len(COLORS)]
+    wrapped = "<br>".join(textwrap.fill(headline, width=22).split("\n"))
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{
+    width:1080px; height:1080px;
+    background: linear-gradient(145deg, #{bg1} 0%, #{bg2} 100%);
+    display:flex; flex-direction:column;
+    justify-content:center; align-items:center;
+    font-family:'Arial Black', Arial, sans-serif;
+    color:white; position:relative; overflow:hidden;
+  }}
+  .glow {{
+    position:absolute; border-radius:50%; filter:blur(90px); opacity:0.18;
+  }}
+  .g1 {{ width:700px; height:700px; background:#{accent}; top:-300px; right:-200px; }}
+  .g2 {{ width:500px; height:500px; background:#{accent}; bottom:-200px; left:-150px; }}
+  .card {{
+    position:relative; z-index:10;
+    text-align:center; padding:80px 100px; max-width:960px;
+  }}
+  .tag {{
+    display:inline-block;
+    background:#{accent}22; border:1px solid #{accent}55;
+    color:#{light}; font-size:18px; font-weight:700;
+    letter-spacing:3px; text-transform:uppercase;
+    padding:10px 24px; border-radius:100px; margin-bottom:52px;
+  }}
+  .headline {{
+    font-size:82px; font-weight:900; line-height:1.05;
+    margin-bottom:44px; color:white; letter-spacing:-1px;
+  }}
+  .bar {{
+    width:60px; height:4px;
+    background:linear-gradient(90deg, #{accent}, #{light});
+    margin:0 auto 44px; border-radius:2px;
+  }}
+  .subtext {{
+    font-size:30px; font-weight:400; color:#94a3b8;
+    line-height:1.6; margin-bottom:52px;
+    font-family:Arial, sans-serif;
+  }}
+  .cta {{
+    font-size:26px; font-weight:800; color:#{light};
+    letter-spacing:1px; text-transform:uppercase;
+  }}
+  .brand {{
+    position:absolute; bottom:44px;
+    font-size:20px; font-weight:900; color:#374151;
+    letter-spacing:3px; text-transform:uppercase;
+  }}
+  .brand span {{ color:#{accent}; }}
+</style>
+</head>
+<body>
+  <div class="glow g1"></div>
+  <div class="glow g2"></div>
+  <div class="card">
+    <div class="tag">Jake Stone · Adapt API</div>
+    <div class="headline">{wrapped}</div>
+    <div class="bar"></div>
+    <div class="subtext">{subtext}</div>
+    <div class="cta">👇 {cta}</div>
+  </div>
+  <div class="brand">Jake Stone <span>•</span> Adapt API</div>
+</body></html>"""
+
+
+def render_png(html_content, output_path):
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(viewport={"width": 1080, "height": 1080})
+            page.set_content(html_content)
+            page.wait_for_timeout(600)
+            page.screenshot(path=output_path, full_page=False)
+            browser.close()
+        return True
+    except Exception as e:
+        logger.error(f"PNG render failed: {e}")
+        return False
 
 
 def upload_image_to_slack(file_path):
-    """Upload PNG to Slack, return file permalink."""
+    """Upload via files.upload (legacy but works with im:write + files:write)."""
     with open(file_path, "rb") as f:
-        data = f.read()
-
-    # Step 1: get upload URL
-    r = requests.post(
-        "https://slack.com/api/files.getUploadURLExternal",
-        headers={"Authorization": f"Bearer {SLACK_TOKEN}"},
-        data={"filename": "li_asset.png", "length": len(data)}
-    )
-    r.raise_for_status()
+        r = requests.post(
+            "https://slack.com/api/files.upload",
+            headers={"Authorization": f"Bearer {SLACK_TOKEN}"},
+            data={
+                "channels": SLACK_USER_ID,
+                "filename": "li_asset.png",
+                "title": "LinkedIn Quote Card",
+                "initial_comment": "🖼️ _Your LinkedIn asset for today — post this as your first comment to drive engagement_"
+            },
+            files={"file": ("li_asset.png", f, "image/png")}
+        )
     resp = r.json()
-    if not resp.get("ok"):
-        raise Exception(f"Slack upload URL error: {resp.get('error')}")
-
-    upload_url = resp["upload_url"]
-    file_id = resp["file_id"]
-
-    # Step 2: upload bytes
-    requests.post(upload_url, data=data, headers={"Content-Type": "image/png"})
-
-    # Step 3: complete upload — share to DM channel
-    r2 = requests.post(
-        "https://slack.com/api/files.completeUploadExternal",
-        headers={"Authorization": f"Bearer {SLACK_TOKEN}", "Content-Type": "application/json"},
-        json={"files": [{"id": file_id}], "channel_id": SLACK_USER_ID, "initial_comment": "🖼️ *Today's LinkedIn asset* — post this as your first comment to drive engagement 👇"}
-    )
-    r2.raise_for_status()
-    return file_id
+    return resp.get("ok"), resp.get("file", {}).get("id", ""), resp.get("error", "")
 
 
-def send_slack_message(post_text, asset_type, image_ok):
+def send_slack_message(post_text, asset_type, png_b64=None):
     today = datetime.now().strftime("%A, %B %d")
-    asset_label = {"quote_card": "Quote Card 💬", "stat_card": "Stat Card 📊", "poll_card": "Poll Card 🗳️"}.get(asset_type, "Asset")
-    image_note = "🖼️ *Asset image sent separately above* — drop it as your first comment to tease engagement." if image_ok else "_(Image generation unavailable today — asset sent as text above)_"
+    label = {"quote_card": "Quote Card", "stat_card": "Stat Card", "poll_card": "Poll Card"}.get(asset_type, "Asset")
+    service_url = os.environ.get("SERVICE_URL", "https://agent-li-posts.onrender.com")
 
     msg = f"""📝 *Your LinkedIn post for {today}*
 
 {post_text}
 
 ---
-{image_note}
-
-_Copy the post above, paste to LinkedIn, then add the {asset_label} as your first comment. Takes 30 seconds. 🚀_"""
+🖼️ *{label}* → <{service_url}/asset|Download your graphic here>
+_Post this as your first comment right after publishing to spike engagement 🚀_"""
 
     r = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {SLACK_TOKEN}", "Content-Type": "application/json"},
         json={"channel": SLACK_USER_ID, "text": msg}
     )
-    r.raise_for_status()
     return r.json()
 
 
@@ -172,40 +248,27 @@ def run_daily_post(day_num=None):
     if day_num is None:
         day_num = datetime.now().timetuple().tm_yday
 
-    logger.info(f"Generating LinkedIn post (day_num={day_num})")
+    logger.info(f"Generating LinkedIn post (day={day_num})")
 
+    # Generate post + asset concept
     result = generate_post_and_asset(day_num)
     post_text = result["post"]
     asset_type = result["asset_type"]
-    headline = result["asset_headline"]
-    subtext = result["asset_subtext"]
-    cta = result["asset_cta"]
 
-    logger.info(f"Post generated ({len(post_text)} chars). Asset: {asset_type} — '{headline}'")
+    # Render graphic
+    html = generate_graphic_html(result["headline"], result["subtext"], result["cta"], day_num)
+    png_path = "/tmp/li_asset.png"
+    png_ok = render_png(html, png_path)
 
-    # Generate image
-    img_path = generate_image(asset_type, headline, subtext, cta, day_num, "/tmp/li_asset.png")
-    image_ok = False
-
-    if img_path:
-        try:
-            upload_image_to_slack(img_path)
-            image_ok = True
-            logger.info("Image uploaded to Slack successfully")
-            time.sleep(1)  # let the image message land first
-        except Exception as e:
-            logger.error(f"Image upload failed: {e}")
-
-    # Send post text message
-    resp = send_slack_message(post_text, asset_type, image_ok)
-    logger.info(f"Post message sent: {resp.get('ok')}")
+    # Send post text + image link
+    resp = send_slack_message(post_text, asset_type)
+    logger.info(f"Slack sent: {resp.get('ok')}")
 
     return {
         "status": "success",
         "post_length": len(post_text),
         "asset_type": asset_type,
-        "asset_headline": headline,
-        "image_generated": image_ok,
+        "png_generated": png_ok,
         "slack_ok": resp.get("ok"),
-        "post_preview": post_text[:150] + "..."
+        "preview": post_text[:150]
     }

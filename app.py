@@ -3,7 +3,7 @@ import threading
 import traceback
 import logging
 from datetime import datetime
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from agent import run_daily_post
 
 logging.basicConfig(level=logging.INFO)
@@ -48,7 +48,15 @@ def run():
     t = threading.Thread(target=run_in_background, args=(day_num,))
     t.daemon = True
     t.start()
-    return jsonify({"status": "started", "message": "Post generation started. Check /status."})
+    return jsonify({"status": "started"})
+
+@app.route("/asset", methods=["GET"])
+def serve_asset():
+    """Serve the latest generated PNG asset."""
+    path = "/tmp/li_asset.png"
+    if not os.path.exists(path):
+        return jsonify({"error": "No asset generated yet"}), 404
+    return send_file(path, mimetype="image/png")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

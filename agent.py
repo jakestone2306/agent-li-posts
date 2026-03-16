@@ -205,41 +205,69 @@ def render_png(html_content, output_path):
         return False
 
 
+def get_dm_channel_id():
+    """Get or open the DM channel with the user."""
+    r = requests.post(
+        "https://slack.com/api/conversations.open",
+        headers={"Authorization": f"Bearer {SLACK_TOKEN}", "Content-Type": "application/json"},
+        json={"users": SLACK_USER_ID}
+    )
+    return r.json().get("channel", {}).get("id", SLACK_USER_ID)
+
+
 def upload_image_to_slack(file_path):
-    """Upload via files.upload (legacy but works with im:write + files:write)."""
+    """Upload image inline to Slack DM using the new files API."""
     with open(file_path, "rb") as f:
-        r = requests.post(
-            "https://slack.com/api/files.upload",
-            headers={"Authorization": f"Bearer {SLACK_TOKEN}"},
-            data={
-                "channels": SLACK_USER_ID,
-                "filename": "li_asset.png",
-                "title": "LinkedIn Quote Card",
-                "initial_comment": "🖼️ _Your LinkedIn asset for today — post this as your first comment to drive engagement_"
-            },
-            files={"file": ("li_asset.png", f, "image/png")}
-        )
-    resp = r.json()
-    return resp.get("ok"), resp.get("file", {}).get("id", ""), resp.get("error", "")
+        img_data = f.read()
+
+    dm_channel = get_dm_channel_id()
+
+    # Step 1: Get upload URL
+    r1 = requests.post(
+        "https://slack.com/api/files.getUploadURLExternal",
+        headers={"Authorization": f"Bearer {SLACK_TOKEN}"},
+        data={"filename": "li_asset.png", "length": len(img_data)}
+    )
+    resp1 = r1.json()
+    if not resp1.get("ok"):
+        return False, "", resp1.get("error", "")
+
+    upload_url = resp1["upload_url"]
+    file_id = resp1["file_id"]
+
+    # Step 2: Upload bytes
+    requests.post(upload_url, data=img_data, headers={"Content-Type": "image/png"})
+
+    # Step 3: Complete and share to DM
+    r3 = requests.post(
+        "https://slack.com/api/files.completeUploadExternal",
+        headers={"Authorization": f"Bearer {SLACK_TOKEN}", "Content-Type": "application/json"},
+        json={
+            "files": [{"id": file_id, "title": "LinkedIn Quote Card"}],
+            "channel_id": dm_channel,
+            "initial_comment": "🖼️ *Your LinkedIn graphic* — drop this as your *first comment* right after posting to spike engagement 🚀"
+        }
+    )
+    resp3 = r3.json()
+    return resp3.get("ok"), file_id, resp3.get("error", "")
 
 
-def send_slack_message(post_text, asset_type, png_b64=None):
+def send_slack_message(post_text, asset_type):
     today = datetime.now().strftime("%A, %B %d")
     label = {"quote_card": "Quote Card", "stat_card": "Stat Card", "poll_card": "Poll Card"}.get(asset_type, "Asset")
-    service_url = os.environ.get("SERVICE_URL", "https://agent-li-posts.onrender.com")
+    dm_channel = get_dm_channel_id()
 
     msg = f"""📝 *Your LinkedIn post for {today}*
 
 {post_text}
 
 ---
-🖼️ *{label}* → <{service_url}/asset|Download your graphic here>
-_Post this as your first comment right after publishing to spike engagement 🚀_"""
+🖼️ *{label} sent above* — post it as your *first comment* right after publishing to spike engagement 🚀"""
 
     r = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {SLACK_TOKEN}", "Content-Type": "application/json"},
-        json={"channel": SLACK_USER_ID, "text": msg}
+        json={"channel": dm_channel, "text": msg}
     )
     return r.json()
 
@@ -260,7 +288,15 @@ def run_daily_post(day_num=None):
     png_path = "/tmp/li_asset.png"
     png_ok = render_png(html, png_path)
 
-    # Send post text + image link
+    # Upload image inline to Slack DM
+    image_ok = False
+    if png_ok:
+        ok, file_id, err = upload_image_to_slack(png_path)
+        image_ok = ok
+        if not ok:
+            logger.error(f"Image upload failed: {err}")
+
+    # Send post text
     resp = send_slack_message(post_text, asset_type)
     logger.info(f"Slack sent: {resp.get('ok')}")
 
@@ -269,6 +305,7 @@ def run_daily_post(day_num=None):
         "post_length": len(post_text),
         "asset_type": asset_type,
         "png_generated": png_ok,
+        "image_uploaded": image_ok,
         "slack_ok": resp.get("ok"),
         "preview": post_text[:150]
     }

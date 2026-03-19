@@ -189,16 +189,11 @@ def generate_graphic_html(headline, subtext, cta, day_num=0):
 </body></html>"""
 
 
-def render_png(html_content, output_path):
+def render_png(html_content, output_path, headline="", subtext="", cta="", day_num=0):
+    """Use Pillow-based graphic generator — no browser needed."""
     try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            page = browser.new_page(viewport={"width": 1080, "height": 1080})
-            page.set_content(html_content)
-            page.wait_for_timeout(600)
-            page.screenshot(path=output_path, full_page=False)
-            browser.close()
+        from graphic import generate_graphic
+        generate_graphic(headline, subtext, cta, day_num=day_num, output_path=output_path)
         return True
     except Exception as e:
         logger.error(f"PNG render failed: {e}")
@@ -286,7 +281,7 @@ def run_daily_post(day_num=None):
     # Render graphic
     html = generate_graphic_html(result["headline"], result["subtext"], result["cta"], day_num)
     png_path = "/tmp/li_asset.png"
-    png_ok = render_png(html, png_path)
+    png_ok = render_png(html, png_path, result["headline"], result["subtext"], result["cta"], day_num)
 
     # Upload image inline to Slack DM
     image_ok = False
